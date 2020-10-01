@@ -1,5 +1,5 @@
 use gdnative::prelude::*;
-use std::io::{Error, ErrorKind, Read, Seek, SeekFrom};
+use std::io::{Error, ErrorKind, Read, Seek, SeekFrom, Write};
 pub struct PoolByteArray {
     byte_array: ByteArray,
     array_seek_pos: u64,
@@ -17,6 +17,10 @@ impl PoolByteArray {
             array_seek_pos: 0,
             byte_array: byte_array,
         }
+    }
+    pub fn clear(&mut self) {
+        self.byte_array = ByteArray::new();
+        self.array_seek_pos = 0;
     }
 }
 
@@ -47,5 +51,20 @@ impl Read for PoolByteArray {
             self.array_seek_pos += 1;
         }
         Ok(bytes_returned)
+    }
+}
+impl Write for PoolByteArray {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.byte_array.append_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl ToVariant for PoolByteArray {
+    fn to_variant(&self) -> Variant {
+        self.byte_array.to_variant()
     }
 }
