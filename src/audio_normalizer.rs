@@ -9,6 +9,10 @@ pub struct AudioNormalizer {
     target_loudness: f64,
     split_audio_instrumental: PoolByteArray,
     split_audio_voice: PoolByteArray,
+    ogg_stream_reader: Option<OggStreamReader<PoolByteArray>>,
+    ebu: Option<EbuR128>,
+    remapped_size: i32,
+    normalization_result: Option<f64>,
 }
 
 pub fn clamp(val: u8, min: u8, max: u8) -> u8 {
@@ -27,6 +31,10 @@ impl AudioNormalizer {
             target_loudness: -24.0,
             split_audio_instrumental: PoolByteArray::new(ByteArray::new()),
             split_audio_voice: PoolByteArray::new(ByteArray::new()),
+            ogg_stream_reader: None,
+            ebu: None,
+            remapped_size: 0,
+            normalization_result: None,
         }
     }
 }
@@ -37,12 +45,11 @@ impl AudioNormalizer {
         self.target_loudness = target_loudness
     }
 
-    /// Returns global LUFS loudness for the given OGG file data
     #[export]
-    pub fn get_loudness_gobal(&mut self, _owner: &Reference, stream: ByteArray) -> f64 {
+    pub fn set_target_ogg(&mut self, _owner: &Reference, stream: ByteArray) {
         let result = OggStreamReader::new(PoolByteArray::new(stream));
         match result {
-            Ok(mut reader) => {
+            Ok(reader) => {
                 let mut ebu = EbuR128::new(
                     clamp(reader.ident_hdr.audio_channels, 0, 2) as u32,
                     reader.ident_hdr.audio_sample_rate,
@@ -70,23 +77,53 @@ impl AudioNormalizer {
                         2
                     }
                 };
-                let start = Instant::now();
-                while let Some(pck_samples) = reader.read_dec_packet_itl().unwrap() {
-                    for chunk in pck_samples.chunks(reader.ident_hdr.audio_channels as usize) {
-                        ebu.add_frames_i16(&chunk[0..remapped_size]).unwrap();
-                    }
-                }
-                let loudness = ebu.loudness_global().unwrap();
-                let duration = start.elapsed().as_secs();
-                godot_print!("Finished processing samples, took {} seconds.", duration);
-                return loudness;
+                self.ogg_stream_reader = Some(reader);
+                self.ebu = Some(ebu);
+                self.remapped_size = remapped_size;
             }
             Err(err) => {
                 godot_print!("Error loading OGG file for normalization {:?}", err);
             }
         }
-        self.target_loudness
     }
+
+    #[export]
+    pub fn work_on_normalization(&mut self, _owner: &Reference) -> bool {
+        let ebu = self.ebu.as_mut().unwrap();
+        let ogg_stream_reader = self.ogg_stream_reader.as_mut().unwrap();
+
+        let packet = ogg_stream_reader.read_dec_packet_itl().unwrap();
+
+        match packet {
+            Some(pck_samples) => {
+                for chunk in pck_samples.chunks(ogg_stream_reader.ident_hdr.audio_channels as usize)
+                {
+                    ebu.add_frames_i16(&chunk[0..self.remapped_size as usize])
+                        .unwrap();
+                }
+                false
+            }
+            None => {
+                let start = Instant::now();
+                self.normalization_result = Some(ebu.loudness_global().unwrap());
+                let duration = start.elapsed().as_secs();
+                godot_print!(
+                    "Finished processing global loudness, took {} seconds.",
+                    duration
+                );
+                true
+            }
+        }
+    }
+
+    #[export]
+    pub fn get_normalization_result(&mut self, _owner: &Reference) -> f64 {
+        match self.normalization_result {
+            Some(r) => r,
+            None => 0.0,
+        }
+    }
+
     #[export]
     pub fn split_dsc_audio(&mut self, _owner: &Reference, stream: ByteArray) {
         let result = OggStreamReader::new(PoolByteArray::new(stream));
@@ -113,19 +150,35 @@ impl AudioNormalizer {
                 let mut writer =
                     hound::WavWriter::new(&mut self.split_audio_instrumental, spec).unwrap();
 
+                let start = Instant::now();
+
                 while let Some(pck_samples) = reader.read_dec_packet_itl().unwrap() {
                     let it = pck_samples.chunks(reader.ident_hdr.audio_channels as usize);
+                    let sample_count_per_writer = pck_samples.len();
+                    let sample_count_per_writer =
+                        sample_count_per_writer / (reader.ident_hdr.audio_channels as usize / 4);
+                    let sample_count_per_writer = sample_count_per_writer / 2;
+                    let mut writer_i64 = writer.get_i16_writer(sample_count_per_writer as u32);
+                    let mut writer_i64_v = writer_v.get_i16_writer(sample_count_per_writer as u32);
                     for chunk in it {
-                        let left = chunk.get(0).unwrap();
-                        let right = chunk.get(1).unwrap();
-                        let left_v = chunk.get(2).unwrap();
-                        let right_v = chunk.get(3).unwrap();
-                        writer.write_sample(*left).unwrap();
-                        writer.write_sample(*right).unwrap();
-                        writer_v.write_sample(*left_v).unwrap();
-                        writer_v.write_sample(*right_v).unwrap();
+                        //writer.write_sample(*left).unwrap();
+                        //writer.write_sample(*right).unwrap();
+                        unsafe {
+                            let left = chunk.get_unchecked(0);
+                            let right = chunk.get_unchecked(1);
+                            let left_v = chunk.get_unchecked(2);
+                            let right_v = chunk.get_unchecked(3);
+                            writer_i64.write_sample_unchecked(*left);
+                            writer_i64.write_sample_unchecked(*right);
+                            writer_i64_v.write_sample_unchecked(*left_v);
+                            writer_i64_v.write_sample_unchecked(*right_v);
+                        }
                     }
+                    writer_i64.flush().unwrap();
+                    writer_i64_v.flush().unwrap();
                 }
+                let duration = start.elapsed().as_secs();
+                godot_print!("Finished downsampling, took {} seconds.", duration);
             }
             Err(err) => {
                 godot_print!("Error loading OGG file for downsampling {:?}", err);
