@@ -151,18 +151,24 @@ impl AudioNormalizer {
                     hound::WavWriter::new(&mut self.split_audio_instrumental, spec).unwrap();
 
                 let start = Instant::now();
-
+                let mut packets: Vec<Vec<i16>> = vec![];
+                let mut total = 0;
                 while let Some(pck_samples) = reader.read_dec_packet_itl().unwrap() {
-                    let it = pck_samples.chunks(reader.ident_hdr.audio_channels as usize);
-                    let sample_count_per_writer = pck_samples.len();
-                    let sample_count_per_writer =
-                        sample_count_per_writer / (reader.ident_hdr.audio_channels as usize / 4);
-                    let sample_count_per_writer = sample_count_per_writer / 2;
-                    let mut writer_i64 = writer.get_i16_writer(sample_count_per_writer as u32);
-                    let mut writer_i64_v = writer_v.get_i16_writer(sample_count_per_writer as u32);
+                    total += pck_samples.len();
+                    packets.push(pck_samples);
+                }
+                let sample_count_per_writer = total;
+                let sample_count_per_writer =
+                    sample_count_per_writer / (reader.ident_hdr.audio_channels as usize / 4);
+                let sample_count_per_writer = sample_count_per_writer / 2;
+
+                let mut writer_i64 = writer.get_i16_writer(sample_count_per_writer as u32);
+                let mut writer_i64_v = writer_v.get_i16_writer(sample_count_per_writer as u32);
+                let chunk_size = reader.ident_hdr.audio_channels as usize;
+                for pck in packets {
+                    let it = pck.chunks_exact(chunk_size);
+
                     for chunk in it {
-                        //writer.write_sample(*left).unwrap();
-                        //writer.write_sample(*right).unwrap();
                         unsafe {
                             let left = chunk.get_unchecked(0);
                             let right = chunk.get_unchecked(1);
@@ -174,9 +180,9 @@ impl AudioNormalizer {
                             writer_i64_v.write_sample_unchecked(*right_v);
                         }
                     }
-                    writer_i64.flush().unwrap();
-                    writer_i64_v.flush().unwrap();
                 }
+                writer_i64.flush().unwrap();
+                writer_i64_v.flush().unwrap();
                 let duration = start.elapsed().as_secs();
                 godot_print!("Finished downsampling, took {} seconds.", duration);
             }
