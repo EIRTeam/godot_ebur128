@@ -102,7 +102,12 @@ impl AudioNormalizer {
 
         match packet {
             Some(pck_samples) => {
-                let remapped_samples: Vec<i16> = pck_samples.windows(target_channel_count).step_by(file_channel_count).flatten().copied().collect();
+                // This is to support project diva multi-channel DSCs properly
+                let remapped_samples: Vec<i16> = match file_channel_count {
+                    2 => pck_samples,
+                    4 | 8 => pck_samples.windows(file_channel_count).step_by(file_channel_count).map(|w| [w[0] + w[2], w[1] + w[3]]).flatten().collect(),
+                    _ => pck_samples.windows(target_channel_count).step_by(file_channel_count).flatten().copied().collect()
+                };
                 ebu.add_frames_i16(&remapped_samples)
                     .unwrap();
                 false
